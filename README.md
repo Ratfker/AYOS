@@ -71,6 +71,22 @@ ghostos/
 │   │       └── .bashrc                  ← root shell hardening
 │   └── efiboot/loader/entries/
 │       └── ghostos.conf                 ← bootloader entry
+
+
+ Debian/Ubuntu as base, is what i am going for now.
+Debian has a mature live-build system (live-build) that does almost exactly what our Archiso setup does. You drop your hooks on top of an existing hardened base.
+Debian Live (tmpfs root)
+  └─▶ your ghost_ramboot hook (same logic, different build tool)
+        └─▶ your kill-switch, sysctl, journald config
+              └─▶ Tor Browser ships as a .deb already
+What you get for free from Debian:
+
+Security team actively patching packages
+debootstrap produces reproducible minimal roots
+AppArmor ships and works out of the box
+live-build handles the squashfs + initramfs pipeline
+
+What changes in your code: almost nothing. The ghost_ramboot hook logic is identical. The build tool changes from mkarchiso to lb config + lb build.
 └── docs/
     ├── BOOT_FLOW.md          ← Detailed initramfs walkthrough
     └── THREAT_MODEL.md       ← What this protects against
