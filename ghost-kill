@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# =============================================================================
+# GhostOS — /usr/local/bin/ghost-kill
+#
+# THE KILL-SWITCH.
+# Called by udev when the boot USB is removed (or by ghost-init on trigger).
+#
+# Philosophy: No cleanup. No grace period. No mercy.
+# The goal is SPEED — minimize window between USB removal and RAM wipe.
+#
+# What this does:
+#   1. Writes a few bytes of zeros to mark memory (optional forensic measure)
+#   2. Drops all filesystem caches
+#   3. Forces an immediate reboot via sysrq
+#
+# What it does NOT do:
+#   - Write anything to disk (there's nothing to write to)
+#   - Try to "safely unmount" (waste of time — RAM disappears on power cycle)
+#   - Warn the user (too slow, too traceable)
+#
+# Note on memory wiping:
+#   True RAM wiping requires a custom kernel module or kexec into a wipe kernel.
+#   This script does the best possible from userspace.
+#   For hardware-level guarantees, see docs/THREAT_MODEL.md.
+# =============================================================================
+
+set -e
+
+# --- Step 0: Become unkillable (as much as possible) ---
+# Set our OOM score to -1000 so the OOM killer never terminates us
+echo -1000 > /proc/$$/oom_score_adj 2>/dev/null || true
+
+# Log the kill event (to RAM journal only — it dies with us)
+logger -t ghost-kill "KILL SWITCH TRIGGERED — initiating immediate wipe-reboot"
+
+# --- Step 1: Drop filesystem caches ---
+# Forces any pending writes (there shouldn't be any, but be thorough)
+sync
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+# --- Step 2: Disable swap (paranoia — should already be off) ---
+swapoff -a 2>/dev/null || true
+
+# --- Step 3: Fill available memory with zeros (optional, time-permitting) ---
+# This is best-effort. We try to zero out as much RAM as possible
+# before the forced reboot clears it naturally.
+# This matters for cold-boot attacks — reduces recoverable data.
+# We run it in background and give it 1 second max.
+(
+    # Write zeros to /dev/null reading from /dev/zero is a no-op; we need tmpfs
+    # This fills the tmpfs upper layer with zeros (overwrites our working data)
+    dd if=/dev/zero of=/run/ghost/wipe_mem bs=1M count=512 2>/dev/null || true
+    rm -f /run/ghost/wipe_mem 2>/dev/null || true
+) &
+WIPE_PID=$!
+sleep 1
+kill $WIPE_PID 2>/dev/null || true
+
+# --- Step 4: INSTANT REBOOT via sysrq ---
+# 'b' = reboot immediately, no filesystem sync, no shutdown hooks
+# This is the fastest possible path to RAM clearance.
+echo 1 > /proc/sys/kernel/sysrq
+echo b > /proc/sysrq-trigger
+
+# --- Fallback: if sysrq fails, use systemctl ---
+# Should never reach here, but defense in depth
+sleep 1
+systemctl --force --force reboot
+
+# --- Final fallback: kernel panic ---
+# If everything else fails, crash the kernel
+sleep 2
+echo c > /proc/sysrq-trigger

@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# =============================================================================
+# GhostOS — initramfs hook: ghost_ramboot
+# File location in built image: /usr/lib/initcpio/hooks/ghost_ramboot
+#
+# This is the MOST CRITICAL file in the entire project.
+# It runs inside the minimal initramfs environment (before the real OS starts).
+#
+# What it does:
+#   1. Finds the USB device containing rootfs.squashfs
+#   2. Copies the squashfs entirely into a tmpfs (RAM)
+#   3. Mounts it with an OverlayFS (so writes go to RAM, not USB)
+#   4. Hands off to the real init via switch_root
+#
+# After this runs:
+#   - The USB is MOUNTED READ-ONLY then UNMOUNTED
+#   - The entire OS runs from RAM
+#   - Removing the USB triggers the kill-switch (separate hook)
+#   - Rebooting leaves zero artifacts
+# =============================================================================
+
+run_hook() {
+    msg "GhostOS: Starting RAM boot sequence..."
+
+    # -------------------------------------------------------------------------
+    # STEP 1: Create the RAM filesystem (tmpfs)
+    # This is the "blank canvas" in RAM where everything will live.
+    # Size: 4G is enough for a minimal system + working files.
+    # Increase if your squashfs + working data exceeds this.
+    # -------------------------------------------------------------------------
+    msg "GhostOS: Creating tmpfs root (4G)..."
+    mkdir -p /ghost_ram
+    mount -t tmpfs -o size=4G,mode=755 tmpfs /ghost_ram
+
+    # Create the directory structure needed for OverlayFS
+    mkdir -p /ghost_ram/{rootfs_img,rootfs_ro,rw_upper,rw_work,merged}
+
+    # -------------------------------------------------------------------------
+    # STEP 2: Find and mount the USB device
+    # We look for a partition labeled "GHOSTOS_*" or containing rootfs.squashfs
+    # -------------------------------------------------------------------------
+    msg "GhostOS: Scanning for boot device..."
+    local usb_dev=""
+    local squashfs_path=""
+
+    # Wait up to 10 seconds for devices to appear
+    for i in $(seq 1 10); do
+        for dev in /dev/sd?1 /dev/vd?1 /dev/mmcblk?p1; do
+            [ -b "$dev" ] || continue
+            mkdir -p /ghost_mnt_probe
+            if mount -o ro "$dev" /ghost_mnt_probe 2>/dev/null; then
+                if [ -f /ghost_mnt_probe/rootfs.squashfs ]; then
+                    usb_dev="$dev"
+                    squashfs_path="/ghost_mnt_probe/rootfs.squashfs"
+                    msg "GhostOS: Found squashfs on $dev"
+                    break 2
+                fi
+                umount /ghost_mnt_probe
+            fi
+        done
+        sleep 1
+    done
+
+    if [ -z "$usb_dev" ]; then
+        err "GhostOS: FATAL — rootfs.squashfs not found on any device!"
+        err "GhostOS: Dropping to emergency shell."
+        launch_interactive_shell
+        return 1
+    fi
+
+    # -------------------------------------------------------------------------
+    # STEP 3: Copy squashfs into RAM
+    # This is the key step. Once copied, the USB is never read again.
+    # cp command gives us the full squashfs in /ghost_ram/rootfs_img/
+    # -------------------------------------------------------------------------
+    msg "GhostOS: Copying squashfs to RAM (this takes ~10-30s)..."
+    local sqsh_ram="/ghost_ram/rootfs_img/rootfs.squashfs"
+    cp "$squashfs_path" "$sqsh_ram"
+
+    # Verify the copy integrity
+    local src_size dest_size
+    src_size=$(stat -c%s "$squashfs_path")
+    dest_size=$(stat -c%s "$sqsh_ram")
+    if [ "$src_size" != "$dest_size" ]; then
+        err "GhostOS: FATAL — squashfs copy integrity check FAILED!"
+        err "GhostOS: src=$src_size bytes, dest=$dest_size bytes"
+        launch_interactive_shell
+        return 1
+    fi
+    msg "GhostOS: squashfs copy verified ($dest_size bytes)"
+
+    # -------------------------------------------------------------------------
+    # STEP 4: Unmount USB — we no longer need it
+    # The OS now lives entirely in RAM. USB is disconnected logically.
+    # -------------------------------------------------------------------------
+    umount /ghost_mnt_probe
+    msg "GhostOS: USB unmounted. System is now RAM-resident."
+
+    # -------------------------------------------------------------------------
+    # STEP 5: Mount the squashfs read-only
+    # This gives us the base OS filesystem as a read-only layer.
+    # -------------------------------------------------------------------------
+    msg "GhostOS: Mounting squashfs (read-only layer)..."
+    mount -t squashfs -o loop,ro "$sqsh_ram" /ghost_ram/rootfs_ro
+
+    # -------------------------------------------------------------------------
+    # STEP 6: Create OverlayFS on top
+    # lowerdir = read-only squashfs (base OS)
+    # upperdir = tmpfs (all writes go here — in RAM)
+    # workdir  = tmpfs (overlay internals)
+    # merged   = the unified view the OS sees
+    # -------------------------------------------------------------------------
+    msg "GhostOS: Assembling OverlayFS..."
+    mount -t overlay overlay \
+        -o lowerdir=/ghost_ram/rootfs_ro,upperdir=/ghost_ram/rw_upper,workdir=/ghost_ram/rw_work \
+        /ghost_ram/merged
+
+    if [ $? -ne 0 ]; then
+        err "GhostOS: FATAL — OverlayFS mount failed!"
+        launch_interactive_shell
+        return 1
+    fi
+
+    # -------------------------------------------------------------------------
+    # STEP 7: Record the boot device path for the kill-switch
+    # The udev kill-switch needs to know which device to watch for removal.
+    # We write this to /run (tmpfs) so it's available in the real OS.
+    # -------------------------------------------------------------------------
+    mkdir -p /ghost_ram/merged/run/ghost
+    echo "$usb_dev" > /ghost_ram/merged/run/ghost/boot_device
+    msg "GhostOS: Boot device recorded: $usb_dev"
+
+    # -------------------------------------------------------------------------
+    # STEP 8: Bind critical pseudo-filesystems
+    # These are needed by switch_root to work correctly.
+    # -------------------------------------------------------------------------
+    for fs in proc sys dev run; do
+        mkdir -p /ghost_ram/merged/$fs
+        mount --bind /$fs /ghost_ram/merged/$fs 2>/dev/null || true
+    done
+
+    # -------------------------------------------------------------------------
+    # STEP 9: switch_root — hand off to the real init
+    # This replaces the initramfs PID 1 with the real systemd.
+    # After this line, we are running the full OS from RAM.
+    # -------------------------------------------------------------------------
+    msg "GhostOS: RAM boot complete. Switching root..."
+    exec switch_root /ghost_ram/merged /sbin/init
+
+    # Should never reach here
+    err "GhostOS: switch_root FAILED — this is a critical error!"
+    launch_interactive_shell
+}
