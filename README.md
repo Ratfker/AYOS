@@ -1,4 +1,4 @@
-# GhostOS — Amnesic RAM-Boot System
+# AYOS — Amnesic RAM-Boot System
 
 A minimal Arch-based OS that lives entirely in RAM.
 Pull the USB → it dies clean. No artifacts. No state. No mercy.
