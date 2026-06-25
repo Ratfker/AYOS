@@ -77,17 +77,20 @@ run_hook() {
     local sqsh_ram="/ghost_ram/rootfs_img/rootfs.squashfs"
     cp "$squashfs_path" "$sqsh_ram"
 
-    # Verify the copy integrity
-    local src_size dest_size
-    src_size=$(stat -c%s "$squashfs_path")
-    dest_size=$(stat -c%s "$sqsh_ram")
-    if [ "$src_size" != "$dest_size" ]; then
+    # Verify the copy integrity via sha256 (size-only check misses bit-flips
+    # and partial corruption — sha256 catches both)
+    msg "GhostOS: Verifying squashfs integrity (sha256)..."
+    local src_hash dest_hash
+    src_hash=$(sha256sum "$squashfs_path" | awk '{print $1}')
+    dest_hash=$(sha256sum "$sqsh_ram"     | awk '{print $1}')
+    if [ "$src_hash" != "$dest_hash" ]; then
         err "GhostOS: FATAL — squashfs copy integrity check FAILED!"
-        err "GhostOS: src=$src_size bytes, dest=$dest_size bytes"
+        err "GhostOS: src  sha256=$src_hash"
+        err "GhostOS: dest sha256=$dest_hash"
         launch_interactive_shell
         return 1
     fi
-    msg "GhostOS: squashfs copy verified ($dest_size bytes)"
+    msg "GhostOS: squashfs verified OK (sha256=$dest_hash)"
 
     # -------------------------------------------------------------------------
     # STEP 4: Unmount USB — we no longer need it

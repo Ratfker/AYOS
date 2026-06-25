@@ -24,7 +24,10 @@
 #   For hardware-level guarantees, see docs/THREAT_MODEL.md.
 # =============================================================================
 
-set -e
+# No set -e here intentionally. With set -e, any unexpected failure before
+# the sysrq line could abort the script and leave the system running.
+# Each step below is individually hardened with || true where appropriate.
+# The goal is: always reach "echo b > /proc/sysrq-trigger" no matter what.
 
 # --- Step 0: Become unkillable (as much as possible) ---
 # Set our OOM score to -1000 so the OOM killer never terminates us

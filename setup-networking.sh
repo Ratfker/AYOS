@@ -203,7 +203,9 @@ table inet ghost_filter {
         
         # Allow WireGuard tunnel traffic (only to VPN server)
         # This is the ONLY thing that can exit without going through Tor
-        oif != "wg0" udp dport 51820 accept     # WireGuard UDP
+        # oif != "lo" means: allow on any real interface (eth0, wlan0, etc.)
+        # but NOT loopback. Combined with udp dport 51820 this is tight.
+        oif != "lo" udp dport 51820 accept      # WireGuard UDP
         
         # Allow all traffic out through WireGuard (it'll hit Tor inside the VPN)
         oif "wg0" accept
@@ -241,8 +243,12 @@ table ip ghost_nat {
         tcp dport 53 redirect to :5353
         
         # Redirect all TCP to Tor's transparent proxy port
-        # Exception: WireGuard server IP (needs to reach VPN, not through Tor)
-        tcp flags & (fin|syn|rst|ack) == syn redirect to :9040
+        # Exception: WireGuard server IP — must reach VPN directly, not through Tor.
+        # (WireGuard is not the 'tor' user, so skuid tor above doesn't cover it.
+        #  Without this exception the VPN handshake itself gets redirected into
+        #  Tor, which hasn't bootstrapped yet — deadlock.)
+        # REPLACE <VPN_SERVER_IP> with the resolved IP of your VPN endpoint.
+        ip daddr != <VPN_SERVER_IP> tcp flags & (fin|syn|rst|ack) == syn redirect to :9040
     }
 }
 NFTEOF
